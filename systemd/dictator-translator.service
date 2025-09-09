@@ -1,0 +1,39 @@
+[Unit]
+Description=Dictator Translator - Real-time speech translation service
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+Environment="DISPLAY=:0"
+Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="XDG_RUNTIME_DIR=/run/user/%i"
+Environment="PULSE_RUNTIME_PATH=/run/user/%i/pulse"
+WorkingDirectory=/opt/dictator-translator
+ExecStart=/opt/dictator-translator/.venv/bin/python /opt/dictator-translator/src/main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dictator-translator
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=no
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/dictator-translator
+ReadWritePaths=%h/.config/dictator-translator
+ReadWritePaths=/tmp
+ReadWritePaths=/dev/snd
+
+# Audio permissions
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=default.target
