@@ -15,556 +15,13 @@ import tempfile
 import signal
 import time
 import queue
-# Removed speech_recognition - ONLY USING WHISPER
+import subprocess
 
-# Try to import Whisper for local speech recognition
-try:
-    from faster_whisper import WhisperModel
-    WHISPER_AVAILABLE = True
-    print("✅ Whisper available - using local speech recognition")
-except ImportError:
-    WHISPER_AVAILABLE = False
-    print("⚠️ Whisper not available - using Google Speech Recognition")
+# Import our separated classes
+from recorder import PureRecorder
+from hotkey_manager import HotkeyManager
+from ui_utils import UIWatchdog, UIUpdateRequest
 
-try:
-    import pyaudio
-    PYAUDIO_AVAILABLE = True
-except ImportError:
-    PYAUDIO_AVAILABLE = False
-    print("⚠️ PyAudio not available - audio functionality limited")
-
-class PureRecorder:
-    def __init__(self):
-        self.is_recording = False
-        self.current_microphone_index = None
-        self.audio_data = []
-        self.sample_rate = 44100
-        self.chunk_size = 1024
-        self.supported_rates = [44100, 22050, 16000, 8000]
-        
-        # WHISPER ONLY - no Google Speech Recognition
-        self.whisper_model = None
-        self.whisper_model_name = "tiny"
-        self.use_openai_whisper = False
-        
-        # Audio level monitoring
-        self.current_audio_level = 0
-        self.audio_level_lock = threading.Lock()
-        self.is_monitoring = False
-        self.audio_queue = []
-        
-        self.refresh_microphones()
-        
-        print(f"WHISPER_AVAILABLE at init: {WHISPER_AVAILABLE}")
-        if WHISPER_AVAILABLE:
-            print("Calling load_whisper_model...")
-            self.load_whisper_model()
-            print(f"After loading, self.whisper_model = {self.whisper_model}")
-        else:
-            print("WHISPER_AVAILABLE is False!")
-            self.whisper_model = None
-        
-        # Initialize audio variables (keep it simple)
-        self.audio_data = []
-    
-    def load_whisper_model(self):
-        # Load synchronously with SSL bypass for network issues
-        try:
-            print("Loading Whisper model synchronously...")
-            
-            # Bypass SSL issues
-            import ssl
-            ssl._create_default_https_context = ssl._create_unverified_context
-            
-            device = "cpu"
-            
-            # Try tiny model first - it's fastest to load
-            try:
-                print("Loading tiny Whisper model...")
-                from faster_whisper import WhisperModel
-                self.whisper_model = WhisperModel(
-                    "tiny", 
-                    device=device,
-                    download_root="./whisper_models"
-                )
-                self.whisper_model_name = "tiny"
-                print("✅ Whisper tiny model loaded successfully")
-                return
-            except Exception as e:
-                print(f"Failed to load tiny model: {e}")
-            
-            # Skip openai-whisper due to version conflicts
-            
-            # If all fails, error out
-            print("❌ FATAL: Could not load any Whisper model")
-            self.whisper_model = None
-            
-        except Exception as e:
-            print(f"Whisper loading error: {e}")
-            self.whisper_model = None
-    
-    def refresh_microphones(self):
-        self.available_microphones = []
-        if not PYAUDIO_AVAILABLE:
-            return
-        
-        try:
-            import pyaudio
-            p = pyaudio.PyAudio()
-            
-            # Filter out virtual/system devices that aren't real microphones
-            skip_keywords = [
-                'monitor', 'output', 'loopback', 'echo', 'null', 'auto_null',
-                'pulse', 'default', 'system', 'analog-stereo', 'analog-surround',
-                'iec958', 'hdmi', 'front:', 'rear:', 'center_lfe:', 'side:',
-                'capture.', 'playback.', 'speaker', 'headphones', 'built-in audio',
-                'dummy', 'test', 'rnnoise', 'surround', 'digital', 'spdif',
-                'pipewire', 'alsa_output', 'alsa_input', 'combined',
-                'virtual', 'software', 'proxy', 'tunnel', 'bridge'
-            ]
-            
-            # Enumerate PyAudio input devices
-            for i in range(p.get_device_count()):
-                try:
-                    info = p.get_device_info_by_index(i)
-                    if info.get('maxInputChannels', 0) > 0:
-                        device_name = info.get('name', f"Device {i}")
-                        
-                        # Skip virtual/system devices
-                        if any(keyword in device_name.lower() for keyword in skip_keywords):
-                            continue
-                        
-                        self.available_microphones.append({
-                            'name': device_name,
-                            'index': i
-                        })
-                except Exception:
-                    continue
-            
-            p.terminate()
-            
-            print(f"Found microphones using PyAudio: {[mic['name'] for mic in self.available_microphones]}")
-            
-            if self.available_microphones and self.current_microphone_index is None:
-                self.set_microphone(0)
-                
-        except Exception as e:
-            print(f"Failed to enumerate microphones: {e}")
-    
-    def get_microphone_list(self):
-        return self.available_microphones
-    
-    def set_microphone(self, index):
-        try:
-            if 0 <= index < len(self.available_microphones):
-                self.current_microphone_index = index
-                mic_info = self.available_microphones[index]
-                print(f"Selected microphone: {mic_info['name']}")
-                return True
-        except Exception as e:
-            print(f"Failed to set microphone {index}: {e}")
-        return False
-    
-    def get_current_microphone(self):
-        if (self.current_microphone_index is not None and 
-            0 <= self.current_microphone_index < len(self.available_microphones)):
-            return self.available_microphones[self.current_microphone_index]
-        return None
-    
-    def start_recording(self, callback):
-        if self.is_recording:
-            return
-        
-        self.is_recording = True
-        self.callback = callback
-        print(f"🔥 CALLBACK SET TO: {callback}")
-        
-        print(f"Starting recording with microphone index: {self.current_microphone_index}")
-        thread = threading.Thread(target=self._record_worker)
-        thread.daemon = True
-        thread.start()
-    
-    def stop_recording(self):
-        print("🔥 RECORDER: stop_recording called")
-        self.is_recording = False
-        print("🔥 RECORDER: is_recording set to False")
-    
-    def start_continuous_monitoring(self):
-        """Start continuous audio monitoring like SAI"""
-        if not PYAUDIO_AVAILABLE or self.is_monitoring:
-            return
-        
-        # Ensure any previous monitoring is stopped first
-        self.stop_monitoring()
-        
-        self.is_monitoring = True
-        self.monitoring_thread = threading.Thread(target=self._continuous_monitor_worker, daemon=True)
-        self.monitoring_thread.start()
-    
-    def _continuous_monitor_worker(self):
-        """Continuous audio monitoring worker like SAI"""
-        try:
-            if self.current_microphone_index is None:
-                return
-            
-            p = pyaudio.PyAudio()
-            
-            # Get device info first to check capabilities like SAI does
-            device_index = self.available_microphones[self.current_microphone_index]['index']
-            try:
-                device_info = p.get_device_info_by_index(device_index)
-                max_input_channels = int(device_info['maxInputChannels'])
-                default_rate = int(device_info['defaultSampleRate'])
-                
-                print(f"Device {device_index}: max_channels={max_input_channels}, default_rate={default_rate}")
-                
-                if max_input_channels == 0:
-                    print(f"Device {device_index} has no input channels")
-                    p.terminate()
-                    return
-                
-                # Use the appropriate number of channels (1 for mono, or device max)
-                channels = min(1, max_input_channels)
-                
-            except Exception as e:
-                print(f"Error getting device info: {e}")
-                p.terminate()
-                return
-            
-            stream = None
-            working_rate = None
-            
-            # Try different sample rates with proper channel count
-            rates_to_try = [default_rate] + self.supported_rates
-            for rate in rates_to_try:
-                try:
-                    print(f"Trying {rate}Hz with {channels} channels")
-                    stream = p.open(
-                        format=pyaudio.paInt16,
-                        channels=channels,
-                        rate=int(rate),
-                        input=True,
-                        input_device_index=device_index,
-                        frames_per_buffer=self.chunk_size
-                    )
-                    working_rate = rate
-                    print(f"✓ Success: {rate}Hz with {channels} channels")
-                    break
-                except Exception as e:
-                    print(f"✗ Failed {rate}Hz: {e}")
-                    continue
-            
-            if not stream:
-                print("Could not open audio stream with any supported configuration")
-                p.terminate()
-                return
-            
-            print(f"Started continuous monitoring at {working_rate}Hz with {channels} channels")
-            
-            # Continuous monitoring loop
-            while self.is_monitoring:
-                try:
-                    data = stream.read(self.chunk_size, exception_on_overflow=False)
-                    
-                    # Handle multi-channel audio by taking first channel
-                    if channels > 1:
-                        audio_array = np.frombuffer(data, dtype=np.int16)
-                        audio_chunk = audio_array[::channels]  # Take every Nth sample (first channel)
-                    else:
-                        audio_chunk = np.frombuffer(data, dtype=np.int16)
-                    
-                    # Always add to queue for volume display
-                    self.audio_queue.append(audio_chunk)
-                    if len(self.audio_queue) > 10:  # Keep last 10 chunks
-                        self.audio_queue.pop(0)
-                    
-                    # Only process for transcription if recording
-                    if self.is_recording:
-                        self.audio_data.append(audio_chunk)
-                    
-                except Exception as e:
-                    print(f"Monitor error: {e}")
-                    break
-            
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            
-        except Exception as e:
-            print(f"Continuous monitoring error: {e}")
-    
-    def stop_monitoring(self):
-        """Stop continuous monitoring"""
-        if hasattr(self, 'is_monitoring'):
-            self.is_monitoring = False
-        
-        # Wait for thread to finish to avoid memory issues
-        if hasattr(self, 'monitoring_thread') and self.monitoring_thread.is_alive():
-            self.monitoring_thread.join(timeout=1.0)
-    
-    def _record_worker(self):
-        # FORCE WHISPER LOADING AND ONLY USE WHISPER
-        print(f"WHISPER_AVAILABLE: {WHISPER_AVAILABLE}")
-        print(f"self.whisper_model: {self.whisper_model}")
-        
-        # If Whisper is available but model not loaded, load it now
-        if not self.whisper_model:
-            print("🔧 Loading Whisper model...")
-            try:
-                # Bypass SSL issues
-                import ssl
-                ssl._create_default_https_context = ssl._create_unverified_context
-                
-                from faster_whisper import WhisperModel
-                self.whisper_model = WhisperModel(
-                    "tiny", 
-                    device="cpu",
-                    download_root="./whisper_models"
-                )
-                print("✅ Whisper tiny model loaded successfully")
-            except Exception as e:
-                print(f"FATAL: Failed to load Whisper model: {e}")
-                self.callback("ERROR: Whisper failed to load", "error")
-                return
-        
-        # ONLY USE WHISPER - NO GOOGLE
-        print("🎵 Using Whisper for transcription")
-        self._record_with_whisper()
-    
-    def _record_with_whisper(self):
-        print("🎵 Recording with Whisper...")
-        try:
-            import pyaudio
-            
-            p = pyaudio.PyAudio()
-            
-            # Use default audio device to avoid channel issues
-            print("Setting up default audio input...")
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=1,  # Force mono
-                rate=16000,  # Whisper's preferred rate
-                input=True,
-                frames_per_buffer=1024
-            )
-            
-            print("Recording audio for Whisper processing...")
-            audio_data = []
-            
-            # Record until manually stopped (no time limit)
-            chunk_count = 0
-            
-            while self.is_recording:
-                try:
-                    data = stream.read(1024, exception_on_overflow=False)
-                    audio_chunk = np.frombuffer(data, dtype=np.int16)
-                    audio_data.append(audio_chunk)
-                    
-                    # Calculate REAL audio level for the meter
-                    rms = np.sqrt(np.mean(audio_chunk.astype(np.float32) ** 2))
-                    audio_level = min(100, int((rms / 3000.0) * 100))  # Scale to 0-100
-                    
-                    with self.audio_level_lock:
-                        self.current_audio_level = audio_level
-                    
-                    chunk_count += 1
-                except Exception as e:
-                    print(f"Chunk read error: {e}")
-                    break
-            
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            
-            if not audio_data:
-                print("No audio data recorded")
-                self.callback("", "no_audio")
-                return
-            
-            # Process with Whisper
-            print("Processing audio with Whisper...")
-            audio_array = np.concatenate(audio_data)
-            audio_float = audio_array.astype(np.float32) / 32768.0
-            
-            # Check for minimum audio length
-            if len(audio_float) < 0.1 * 16000:  # Less than 0.1 seconds
-                print("Audio too short")
-                self.callback("", "too_short")
-                return
-            
-            # Transcribe directly with Whisper (no temp file needed)
-            try:
-                if self.whisper_model:
-                    print("🔥 WHISPER: Starting transcription with faster-whisper...")
-                    print(f"🔥 WHISPER: Audio length: {len(audio_float)} samples")
-                    
-                    segments, info = self.whisper_model.transcribe(audio_float)
-                    print("🔥 WHISPER: Transcription completed, processing segments...")
-                    
-                    text = "".join([segment.text for segment in segments]).strip()
-                    language = info.language if hasattr(info, 'language') else "en"
-                    
-                    print(f"🔥 WHISPER: Result text: '{text}' (language: {language})")
-                    print(f"🔥 WHISPER: About to call callback...")
-                    
-                    if text:
-                        print(f"🔥 WHISPER: Calling callback with text: '{text}', '{language}'")
-                        self.callback(text, language)
-                        print(f"🔥 WHISPER: Callback completed successfully")
-                    else:
-                        print(f"🔥 WHISPER: Empty result, calling callback with no_speech")
-                        self.callback("", "no_speech")
-                        print(f"🔥 WHISPER: No speech callback completed")
-                else:
-                    print("🚨 WHISPER: Model not loaded!")
-                    self.callback("", "model_error")
-                    
-            except Exception as e:
-                print(f"🚨 WHISPER: Transcription error: {e}")
-                import traceback
-                traceback.print_exc()
-                self.callback("", "transcription_error")
-                
-        except Exception as e:
-            print(f"Whisper recording setup error: {e}")
-            self.callback("ERROR: Whisper recording failed", "error")
-    
-# GOOGLE SPEECH RECOGNITION COMPLETELY REMOVED - WHISPER ONLY
-
-class HotkeyManager:
-    def __init__(self):
-        self.listener = None
-        self.is_running = False
-        self.ctrl_pressed = False
-        self.space_pressed = False
-        self.hotkey_active = False
-        self.callback = None
-        self.last_callback_success = True
-    
-    def start(self, callback):
-        if self.is_running:
-            return
-        
-        self.callback = callback
-        self.is_running = True
-        
-        try:
-            from pynput import keyboard
-            self.listener = keyboard.Listener(
-                on_press=self._on_key_press,
-                on_release=self._on_key_release
-            )
-            self.listener.start()
-        except ImportError:
-            print("pynput not available - no global hotkeys")
-    
-    def stop(self):
-        if not self.is_running:
-            return
-        
-        self.is_running = False
-        if self.listener:
-            self.listener.stop()
-            self.listener = None
-    
-    def _on_key_press(self, key):
-        try:
-            from pynput import keyboard
-            if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
-                self.ctrl_pressed = True
-            elif key == keyboard.Key.space:
-                self.space_pressed = True
-            
-            if self.ctrl_pressed and self.space_pressed and not self.hotkey_active:
-                self.hotkey_active = True
-                if self.callback:
-                    try:
-                        self.callback()
-                        self.last_callback_success = True
-                    except Exception as e:
-                        print(f"Callback failed: {e}")
-                        self.last_callback_success = False
-                        # If callback fails 3 times in a row, force quit
-                        if not self.last_callback_success:
-                            print("UI appears to be dead, force quitting...")
-                            import os
-                            os._exit(1)
-        except:
-            pass
-    
-    def _on_key_release(self, key):
-        try:
-            from pynput import keyboard
-            if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
-                self.ctrl_pressed = False
-                if self.hotkey_active:
-                    self.hotkey_active = False
-                    if self.callback:
-                        try:
-                            self.callback()
-                            self.last_callback_success = True
-                        except Exception as e:
-                            print(f"Callback failed on release: {e}")
-                            self.last_callback_success = False
-            elif key == keyboard.Key.space:
-                self.space_pressed = False
-                if self.hotkey_active:
-                    self.hotkey_active = False
-                    if self.callback:
-                        try:
-                            self.callback()
-                            self.last_callback_success = True
-                        except Exception as e:
-                            print(f"Callback failed on release: {e}")
-                            self.last_callback_success = False
-        except:
-            pass
-
-# Removed DictationHistoryItem - now using clickable QPushButton items
-
-class UIWatchdog:
-    """Watchdog to detect UI crashes and kill the process"""
-    def __init__(self, window):
-        self.window = window
-        self.last_heartbeat = time.time()
-        self.is_running = True
-        
-        # Start watchdog thread
-        self.watchdog_thread = threading.Thread(target=self._watchdog_worker, daemon=True)
-        self.watchdog_thread.start()
-        
-        # Start heartbeat timer
-        self.heartbeat_timer = QTimer()
-        self.heartbeat_timer.timeout.connect(self._heartbeat)
-        self.heartbeat_timer.start(1000)  # Heartbeat every 1 second
-    
-    def _heartbeat(self):
-        """Update heartbeat timestamp"""
-        self.last_heartbeat = time.time()
-    
-    def _watchdog_worker(self):
-        """Monitor heartbeat and kill process if UI becomes unresponsive"""
-        while self.is_running:
-            time.sleep(2)  # Check every 2 seconds
-            
-            # If no heartbeat for 5 seconds, UI is likely dead
-            if time.time() - self.last_heartbeat > 5:
-                print("🚨 UI WATCHDOG: No heartbeat for 5+ seconds - UI appears dead!")
-                print("🚨 FORCE KILLING PROCESS...")
-                import os
-                os._exit(1)
-    
-    def stop(self):
-        """Stop the watchdog"""
-        self.is_running = False
-        if hasattr(self, 'heartbeat_timer'):
-            self.heartbeat_timer.stop()
-
-class UIUpdateRequest:
-    """UI update request like SAI"""
-    def __init__(self, action, **kwargs):
-        self.action = action
-        self.kwargs = kwargs
 
 class DictatorWindow(QMainWindow):
     def __init__(self):
@@ -650,6 +107,17 @@ class DictatorWindow(QMainWindow):
                 status = request.kwargs.get('status', '')
                 style = request.kwargs.get('style', '')
                 self._safe_update_status(status, style)
+            elif request.action == "toggle_recording":
+                print("🔥 UI_UPDATE: Processing toggle_recording from hotkey")
+                self._safe_toggle_recording()
+            elif request.action == "copy_to_clipboard":
+                text = request.kwargs.get('text', '')
+                print("🔥 UI_UPDATE: Processing copy_to_clipboard")
+                self._safe_copy_to_clipboard(text)
+            elif request.action == "type_text":
+                text = request.kwargs.get('text', '')
+                print("🔥 UI_UPDATE: Processing type_text")
+                self._safe_type_text(text)
         except Exception as e:
             print(f"Error handling UI update {request.action}: {e}")
     
@@ -721,7 +189,7 @@ class DictatorWindow(QMainWindow):
         layout.addLayout(header_layout)
         
         # Status
-        engine_status = "Whisper (loading...)" if WHISPER_AVAILABLE else "Google Speech API"
+        engine_status = "Whisper (loading...)"
         self.status_label = QLabel(f"✅ Ready - {engine_status} - Press Ctrl+Space to dictate")
         self.status_label.setStyleSheet("color: #4CAF50; font-size: 13px; margin: 8px 0;")
         layout.addWidget(self.status_label)
@@ -812,10 +280,10 @@ class DictatorWindow(QMainWindow):
         for bar in self.volume_bars:
             bar.show()
         
-        # Start volume monitoring immediately like SAI
+        # Create volume timer but don't start it yet - only during recording
         self.volume_timer = QTimer()
         self.volume_timer.timeout.connect(self.update_volume_bars)
-        self.volume_timer.start(50)  # Update every 50ms
+        print("🔥 VOLUME: Volume timer created but not started (will start during recording)")
         
         # Settings panel
         self.settings_panel = self.create_settings_panel()
@@ -828,7 +296,7 @@ class DictatorWindow(QMainWindow):
         layout.addWidget(current_label)
         
         self.current_text_area = QTextEdit()
-        self.current_text_area.setPlaceholderText("Most recent transcription will appear here...")
+        self.current_text_area.setPlaceholderText("Most recent transcription will appear here... (Click to copy to clipboard)")
         self.current_text_area.setStyleSheet("""
             QTextEdit {
                 background-color: rgba(25, 25, 25, 200);
@@ -839,9 +307,16 @@ class DictatorWindow(QMainWindow):
                 padding: 8px;
                 margin: 4px 0;
             }
+            QTextEdit:hover {
+                border: 2px solid rgba(76, 175, 80, 150);
+                background-color: rgba(30, 30, 30, 200);
+            }
         """)
         self.current_text_area.setFixedHeight(80)
         self.current_text_area.setReadOnly(True)
+        
+        # Make it clickable to copy
+        self.current_text_area.mousePressEvent = self.copy_current_text
         layout.addWidget(self.current_text_area)
         
         # History collapsible section
@@ -961,7 +436,8 @@ class DictatorWindow(QMainWindow):
         layout.addWidget(self.auto_hide_checkbox)
         
         settings_panel.setLayout(layout)
-        self.refresh_microphones()
+        # Delay microphone refresh to ensure proper initialization
+        QTimer.singleShot(100, self.refresh_microphones)
         return settings_panel
     
     def toggle_settings(self):
@@ -971,26 +447,67 @@ class DictatorWindow(QMainWindow):
         else:
             self.settings_panel.show()
             self.settings_visible = True
+            # Don't refresh every time settings are opened - combo should already be synced
     
     def refresh_microphones(self):
+        print("🔥 MIC_REFRESH: Refreshing microphones...")
         self.recorder.refresh_microphones()
         microphones = self.recorder.get_microphone_list()
         
+        print(f"🔥 MIC_REFRESH: Found {len(microphones)} microphones")
+        
+        # Temporarily disable signals to prevent spam during refresh
+        self.microphone_combo.blockSignals(True)
+        
+        # Clear and repopulate combo box
         self.microphone_combo.clear()
         for mic in microphones:
             self.microphone_combo.addItem(mic['name'], mic['index'])
+            print(f"🔥 MIC_REFRESH: Added mic: {mic['name']} (index: {mic['index']})")
+        
+        # Set current selection to match recorder's selected microphone
+        current_mic = self.recorder.get_current_microphone()
+        if current_mic:
+            print(f"🔥 MIC_REFRESH: Current selected mic: {current_mic['name']} (index: {current_mic['index']})")
+            
+            # Find the combo box index that corresponds to the current microphone
+            for i in range(self.microphone_combo.count()):
+                if self.microphone_combo.itemData(i) == current_mic['index']:
+                    print(f"🔥 MIC_REFRESH: Setting combo box selection to index {i}")
+                    self.microphone_combo.setCurrentIndex(i)
+                    break
+        else:
+            print("🔥 MIC_REFRESH: No current microphone selected")
+            # If no current selection, set the first available microphone as default
+            if microphones:
+                print(f"🔥 MIC_REFRESH: Setting default microphone to first available: {microphones[0]['name']}")
+                self.recorder.set_microphone(0)
+                self.microphone_combo.setCurrentIndex(0)
+        
+        # Re-enable signals after refresh is complete
+        self.microphone_combo.blockSignals(False)
+        print("🔥 MIC_REFRESH: Refresh completed")
     
     def on_microphone_changed(self, index):
+        print(f"🔥 MIC_CHANGE: Microphone selection changed to index {index}")
         if index >= 0:
-            mic_index = self.microphone_combo.itemData(index)
-            self.recorder.set_microphone(mic_index)
-            self.save_config()
+            mic_name = self.microphone_combo.itemText(index)
+            print(f"🔥 MIC_CHANGE: Selected microphone: {mic_name} (combo box index: {index})")
+            
+            # Use the combo box index (not device index) for set_microphone
+            success = self.recorder.set_microphone(index)
+            if success:
+                print(f"🔥 MIC_CHANGE: Successfully set microphone to {mic_name}")
+                self.save_config()
+            else:
+                print(f"🚨 MIC_CHANGE: Failed to set microphone to {mic_name}")
+        else:
+            print("🔥 MIC_CHANGE: Invalid selection index")
     
     def toggle_recording(self):
-        if self.recorder.is_recording:
-            self.stop_recording()
-        else:
-            self.start_recording()
+        print("🔥 HOTKEY: toggle_recording called from hotkey")
+        # Queue the recording toggle to run on main thread (thread-safe)
+        self.request_ui_update("toggle_recording")
     
     def toggle_manual_recording(self):
         print("🔥 BUTTON_CLICK: Manual recording button clicked")
@@ -1018,6 +535,10 @@ class DictatorWindow(QMainWindow):
         
         # Start recording timer
         self.start_recording_timer()
+        
+        # Start volume monitoring during recording
+        print("🔥 VOLUME: Starting volume monitoring during recording...")
+        self.volume_timer.start(20)  # Update every 20ms for more responsive feedback
         
         self.status_label.setText("👂 LISTENING...")
         self.status_label.setStyleSheet("color: #F44336; font-size: 13px; font-weight: bold;")
@@ -1056,6 +577,11 @@ class DictatorWindow(QMainWindow):
             print("🔥 STOP_RECORDING: Stopping recording timer...")
             self.stop_recording_timer()
             print("🔥 STOP_RECORDING: Recording timer stopped")
+            
+            # Stop volume monitoring
+            print("🔥 VOLUME: Stopping volume monitoring...")
+            self.volume_timer.stop()
+            print("🔥 VOLUME: Volume monitoring stopped")
             
             print("🔥 STOP_RECORDING: Updating status label...")
             self.status_label.setText("✅ Ready - Click to listen or press Ctrl+Space")
@@ -1118,6 +644,16 @@ class DictatorWindow(QMainWindow):
         
         if text and text.strip():
             print(f"🔥 Queuing add_history_item for: '{text.strip()}'")
+            
+            # Check if our window is active - if not, type the text as keystrokes
+            if not self.isActiveWindow():
+                print("🔥 KEYBOARD: Window not active, typing text as keystrokes...")
+                self.request_ui_update("type_text", text=text.strip())
+            else:
+                print("🔥 CLIPBOARD: Window is active, using clipboard...")
+                # Queue clipboard copy to ensure it runs on main thread
+                self.request_ui_update("copy_to_clipboard", text=text.strip())
+            
             self.request_ui_update("add_history_item", text=text.strip())
             self.request_ui_update("update_status", 
                                  status="✅ Dictation complete", 
@@ -1149,6 +685,9 @@ class DictatorWindow(QMainWindow):
             print("🔥 Updating current text area...")
             self.current_text_area.setPlainText(text)
             print("🔥 Current text area updated successfully")
+            
+            # Note: Clipboard copy already done in _safe_handle_transcription for immediate access
+            print("🔥 Clipboard copy already completed earlier")
             
             print("🔥 Creating QPushButton...")
             # Create clickable history item
@@ -1225,11 +764,96 @@ class DictatorWindow(QMainWindow):
         if style:
             self.status_label.setStyleSheet(style)
     
+    def _safe_toggle_recording(self):
+        """Safe recording toggle that runs on main thread"""
+        print("🔥 SAFE_TOGGLE: Called on main thread")
+        try:
+            if self.recorder.is_recording:
+                print("🔥 SAFE_TOGGLE: Currently recording - will stop")
+                self.stop_recording()
+            else:
+                print("🔥 SAFE_TOGGLE: Currently not recording - will start")
+                self.start_recording()
+        except Exception as e:
+            print(f"🚨 ERROR in _safe_toggle_recording: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _safe_copy_to_clipboard(self, text):
+        """Safe clipboard copy that runs on main thread"""
+        print(f"🔥 SAFE_CLIPBOARD: Copying to clipboard on main thread: '{text[:50]}...'")
+        try:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            print(f"🔥 SAFE_CLIPBOARD: Successfully copied to clipboard: '{text[:50]}...'")
+            
+            # Test if clipboard actually contains our text
+            clipboard_text = clipboard.text()
+            if clipboard_text == text:
+                print("🔥 SAFE_CLIPBOARD: ✅ Verified clipboard contains correct text")
+            else:
+                print(f"🚨 SAFE_CLIPBOARD: ❌ Clipboard verification failed! Expected: '{text[:30]}...', Got: '{clipboard_text[:30]}...'")
+                
+        except Exception as e:
+            print(f"🚨 ERROR in _safe_copy_to_clipboard: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _safe_type_text(self, text):
+        """Safe text typing that runs on main thread"""
+        print(f"🔥 SAFE_TYPE: Typing text as keystrokes: '{text[:50]}...'")
+        try:
+            # Use pynput to type the text
+            from pynput.keyboard import Controller
+            keyboard = Controller()
+            
+            # Add a small delay to ensure the target window is ready
+            time.sleep(0.1)
+            
+            # Type the text
+            keyboard.type(text)
+            print(f"🔥 SAFE_TYPE: Successfully typed text: '{text[:50]}...'")
+            
+        except Exception as e:
+            print(f"🚨 ERROR in _safe_type_text: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to clipboard if typing fails
+            print("🔥 SAFE_TYPE: Falling back to clipboard...")
+            self._safe_copy_to_clipboard(text)
+    
     # Old method removed - now using queue-based _safe_add_history_item
     
     def show_history_item(self, text):
         # Show the selected history item in the current transcription area
         self.current_text_area.setPlainText(text)
+        
+        # Copy to clipboard
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        print(f"🔥 CLIPBOARD: Copied to clipboard: '{text[:50]}...'")
+    
+    def copy_current_text(self, event):
+        """Copy current transcription text to clipboard when clicked"""
+        text = self.current_text_area.toPlainText()
+        if text.strip():
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            print(f"🔥 CLIPBOARD: Copied current text to clipboard: '{text[:50]}...'")
+            
+            # Visual feedback - briefly change border color
+            original_style = self.current_text_area.styleSheet()
+            self.current_text_area.setStyleSheet(original_style + """
+                QTextEdit {
+                    border: 2px solid rgba(0, 255, 0, 200);
+                }
+            """)
+            
+            # Reset border after 200ms
+            QTimer.singleShot(200, lambda: self.current_text_area.setStyleSheet(original_style))
+        
+        # Don't consume the event, let it propagate
+        event.accept()
     
     def update_recording_timer(self):
         """Update the recording timer display"""
@@ -1344,8 +968,6 @@ class DictatorWindow(QMainWindow):
         self.hotkey_manager.stop()
         
         # Force quit the entire process
-        import os
-        import sys
         print("Force quitting process...")
         QApplication.instance().quit()
         os._exit(0)  # Force immediate exit
@@ -1360,6 +982,17 @@ class DictatorWindow(QMainWindow):
                 with open(self.config_path, 'r') as f:
                     config = json.load(f)
                     self.history = config.get('history', [])
+                    
+                    # Load saved microphone selection
+                    saved_mic_index = config.get('selected_microphone_index')
+                    if saved_mic_index is not None:
+                        print(f"🔥 CONFIG: Loaded saved microphone index: {saved_mic_index}")
+                        success = self.recorder.set_microphone(saved_mic_index)
+                        if success:
+                            print(f"🔥 CONFIG: Successfully restored microphone {saved_mic_index}")
+                        else:
+                            print(f"🚨 CONFIG: Failed to restore microphone {saved_mic_index}")
+                    
                     for text in self.history:
                         # Create clickable history item during load
                         item_btn = QPushButton(f"🎤 {text[:50]}{'...' if len(text) > 50 else ''}")
@@ -1398,8 +1031,12 @@ class DictatorWindow(QMainWindow):
             print("🔥 Config directory created")
             
             print("🔥 Preparing config data...")
-            config = {'history': self.history[-50:]}
-            print(f"🔥 Config data prepared: {len(config['history'])} history items")
+            config = {
+                'history': self.history[-50:],
+                'selected_microphone_index': self.recorder.current_microphone_index,
+                'selected_microphone_device': self.recorder.get_current_microphone()['index'] if self.recorder.get_current_microphone() else None
+            }
+            print(f"🔥 Config data prepared: {len(config['history'])} history items, mic index: {config['selected_microphone_index']}")
             
             print("🔥 Writing config file...")
             with open(self.config_path, 'w') as f:
@@ -1437,6 +1074,7 @@ class DictatorWindow(QMainWindow):
         print(f"Saving window position: ({pos.x()}, {pos.y()})")
         # Could save to config if needed
 
+
 def signal_handler(sig, frame):
     """Handle system signals and force quit"""
     print(f"\n🚨 SIGNAL HANDLER: Received signal {sig}")
@@ -1444,7 +1082,73 @@ def signal_handler(sig, frame):
     import os
     os._exit(1)
 
+
+def monitor_main_thread(window):
+    """Monitor the main thread and kill process if it dies"""
+    import threading
+    main_thread = threading.main_thread()
+    window_was_visible = False
+    consecutive_invisible_count = 0
+    
+    while True:
+        time.sleep(2)  # Check every 2 seconds
+        
+        if not main_thread.is_alive():
+            print("🚨 MONITOR: Main thread is dead! Force killing process...")
+            import os
+            os._exit(1)
+        
+        # Check if window is still valid and visible
+        if window:
+            try:
+                is_visible = window.isVisible()
+                
+                # Track if window was ever visible
+                if is_visible:
+                    window_was_visible = True
+                    consecutive_invisible_count = 0
+                elif window_was_visible:  # Window was visible but now isn't
+                    consecutive_invisible_count += 1
+                    print(f"🚨 MONITOR: Window not visible for {consecutive_invisible_count * 2} seconds")
+                    
+                    # If window disappears for more than 6 seconds, assume it crashed
+                    if consecutive_invisible_count >= 3:
+                        print("🚨 MONITOR: Window disappeared for 6+ seconds - UI likely crashed!")
+                        print("🚨 FORCE KILLING PROCESS...")
+                        import os
+                        os._exit(1)
+                
+                # Double-check: try to access a window property
+                _ = window.windowTitle()
+                
+            except RuntimeError as e:
+                print(f"🚨 MONITOR: Window RuntimeError: {e}! Force killing process...")
+                import os
+                os._exit(1)
+            except Exception as e:
+                print(f"🚨 MONITOR: Window exception: {e}! Force killing process...")
+                import os
+                os._exit(1)
+
+
 def main():
+    # Install desktop integration on first run
+    try:
+        from desktop_integration import install_desktop_files
+        config_dir = Path.home() / ".config" / "dictator"
+        first_run_marker = config_dir / ".desktop_installed"
+        
+        if not first_run_marker.exists():
+            print("🚀 First run detected - installing desktop integration...")
+            if install_desktop_files():
+                config_dir.mkdir(parents=True, exist_ok=True)
+                first_run_marker.touch()
+                print("✅ Desktop integration installed")
+            else:
+                print("⚠️ Desktop integration failed - app will still work")
+    except Exception as e:
+        print(f"⚠️ Desktop integration error: {e} - app will still work")
+    
     # Install signal handlers for crash detection
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -1516,53 +1220,6 @@ def main():
         
         import os
         os._exit(1)
-
-def monitor_main_thread(window):
-    """Monitor the main thread and kill process if it dies"""
-    import threading
-    main_thread = threading.main_thread()
-    window_was_visible = False
-    consecutive_invisible_count = 0
-    
-    while True:
-        time.sleep(2)  # Check every 2 seconds
-        
-        if not main_thread.is_alive():
-            print("🚨 MONITOR: Main thread is dead! Force killing process...")
-            import os
-            os._exit(1)
-        
-        # Check if window is still valid and visible
-        if window:
-            try:
-                is_visible = window.isVisible()
-                
-                # Track if window was ever visible
-                if is_visible:
-                    window_was_visible = True
-                    consecutive_invisible_count = 0
-                elif window_was_visible:  # Window was visible but now isn't
-                    consecutive_invisible_count += 1
-                    print(f"🚨 MONITOR: Window not visible for {consecutive_invisible_count * 2} seconds")
-                    
-                    # If window disappears for more than 6 seconds, assume it crashed
-                    if consecutive_invisible_count >= 3:
-                        print("🚨 MONITOR: Window disappeared for 6+ seconds - UI likely crashed!")
-                        print("🚨 FORCE KILLING PROCESS...")
-                        import os
-                        os._exit(1)
-                
-                # Double-check: try to access a window property
-                _ = window.windowTitle()
-                
-            except RuntimeError as e:
-                print(f"🚨 MONITOR: Window RuntimeError: {e}! Force killing process...")
-                import os
-                os._exit(1)
-            except Exception as e:
-                print(f"🚨 MONITOR: Window exception: {e}! Force killing process...")
-                import os
-                os._exit(1)
 
 
 if __name__ == "__main__":

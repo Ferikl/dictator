@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Dictator
+Comment=Real-time speech-to-text dictation app
+Exec=dictator
+Icon=dictator
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Utility;Office;
+Keywords=dictation;speech;voice;whisper;transcription;
+StartupNotify=true
+StartupWMClass=DICTATOR
+MimeType=
+X-GNOME-SingleWindow=false

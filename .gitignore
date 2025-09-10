@@ -35,6 +35,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+junk/
 
 # IDEs
 .vscode/
