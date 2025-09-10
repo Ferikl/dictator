@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "the-dictator"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Real-time speech-to-text dictation app with floating Qt interface"
 # readme = "README.md"
 license = { text = "MIT" }
@@ -13,17 +13,17 @@ authors = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-    "pyqt6>=6.7.0",
-    "speechrecognition>=3.10.0",
-    "pynput>=1.7.7",
-    "requests>=2.31.0",
-    "numpy>=1.21.0",
-    "pyaudio>=0.2.14",
-    "faster-whisper>=1.1.0",
-    "soundfile>=0.13.1",
-    "librosa>=0.11.0",
-    "sounddevice>=0.5.2",
-    "platformdirs>=4.3.6",
+    "pyqt6>=6.0.0",
+    "speechrecognition>=3.8.0",
+    "pynput>=1.6.0",
+    "requests>=2.20.0",
+    "numpy>=1.18.0",
+    "pyaudio>=0.2.11",
+    "faster-whisper>=0.10.0",
+    "soundfile>=0.10.0",
+    "librosa>=0.8.0",
+    "sounddevice>=0.4.0",
+    "platformdirs>=2.0.0",
 ]
 
 keywords = ["dictation", "speech-to-text", "whisper", "pyqt6", "voice"]
@@ -46,30 +46,43 @@ classifiers = [
 
 [project.optional-dependencies]
 whisper = [
-    "faster-whisper>=1.0.0",
-    "torch>=2.0.0",
-    "transformers>=4.30.0",
-    "sentencepiece>=0.1.99",
-    "numpy>=1.21.0",
-    "soundfile>=0.12.1",
+    "faster-whisper>=0.10.0",
+    "torch>=1.10.0",
+    "transformers>=4.20.0",
+    "sentencepiece>=0.1.95",
+    "numpy>=1.18.0",
+    "soundfile>=0.10.0",
 ]
 translate = [
     "googletrans==4.0.0rc1",
 ]
 audio = [
-    "PyAudio>=0.2.14",
+    "PyAudio>=0.2.11",
+]
+test = [
+    "pytest>=6.0.0",
+    "pytest-cov>=3.0.0",
+    "pytest-mock>=3.0.0",
+    "pytest-qt>=4.0.0",
+    "pytest-timeout>=2.0.0",
 ]
 
 [project.scripts]
-dictator = "src.dictator_main:main"
+dictator = "src.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/chris17453/dictator"
 Repository = "https://github.com/chris17453/dictator.git"
 Issues = "https://github.com/chris17453/dictator/issues"
 
+[tool.hatch.version]
+path = "src/version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/icons" = "src/icons"
 
 [tool.hatch.build.targets.wheel.shared-data]
 "desktop/dictator.desktop" = "share/applications/dictator.desktop"
@@ -81,6 +94,7 @@ packages = ["src"]
 "desktop/dictator-128.png" = "share/icons/hicolor/128x128/apps/dictator.png"
 "desktop/dictator-256.png" = "share/icons/hicolor/256x256/apps/dictator.png"
 "desktop/dictator.ico" = "share/pixmaps/dictator.ico"
+"scripts/setup-permissions.sh" = "share/dictator/setup-permissions.sh"
 
 [tool.uv]
 dev-dependencies = [

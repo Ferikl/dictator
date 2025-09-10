@@ -162,21 +162,29 @@ class PureRecorder:
     def get_microphone_list(self):
         return self.available_microphones
     
-    def set_microphone(self, index):
+    def set_microphone(self, device_index):
+        """Set microphone by device index (not array index)"""
         try:
-            if 0 <= index < len(self.available_microphones):
-                self.current_microphone_index = index
-                mic_info = self.available_microphones[index]
-                print(f"Selected microphone: {mic_info['name']}")
-                return True
+            # Find the array index for this device index
+            for i, mic in enumerate(self.available_microphones):
+                if mic['index'] == device_index:
+                    self.current_microphone_index = device_index  # Store actual device index
+                    print(f"🔥 RECORDER: Selected microphone: {mic['name']} (device index: {device_index})")
+                    return True
+            
+            print(f"🚨 RECORDER: Device index {device_index} not found in available microphones")
+            return False
         except Exception as e:
-            print(f"Failed to set microphone {index}: {e}")
+            print(f"🚨 RECORDER: Failed to set microphone {device_index}: {e}")
         return False
     
     def get_current_microphone(self):
-        if (self.current_microphone_index is not None and 
-            0 <= self.current_microphone_index < len(self.available_microphones)):
-            return self.available_microphones[self.current_microphone_index]
+        """Get current microphone info by device index"""
+        if self.current_microphone_index is not None:
+            # Find microphone by device index
+            for mic in self.available_microphones:
+                if mic['index'] == self.current_microphone_index:
+                    return mic
         return None
     
     def start_recording(self, callback):

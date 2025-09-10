@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """
-Desktop integration utilities for Dictator
+Desktop integration utilities for DICTATOR
+
+Handles proper desktop file creation and icon installation for GNOME compatibility.
+This ensures that DICTATOR appears correctly in:
+- Alt+Tab switcher
+- Activities overview 
+- Dock/panel
+- Application launcher
+
+GNOME ignores setWindowIcon() for system-level displays and requires proper
+desktop file integration with correct WM_CLASS matching.
 """
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from PyQt6.QtWidgets import QApplication
 
 
 def install_desktop_files():
@@ -23,8 +34,8 @@ def install_desktop_files():
         icons_dir.mkdir(parents=True, exist_ok=True)
         
         # Find package installation directory
-        import dictator_main
-        package_dir = Path(dictator_main.__file__).parent.parent
+        import src.dictator as dictator
+        package_dir = Path(dictator.__file__).parent.parent
         desktop_dir = package_dir / "desktop"
         
         # Copy desktop entry
@@ -90,6 +101,63 @@ def uninstall_desktop_files():
         return False
 
 
+# Runtime desktop file creation is deprecated
+# Desktop files and icons are installed via pyproject.toml during pip install
+
+
+def setup_application_properties(app: QApplication):
+    """Configure Qt application properties for proper GNOME integration"""
+    
+    # Set application properties that GNOME uses for window matching
+    app.setApplicationName("DICTATOR")
+    app.setApplicationDisplayName("DICTATOR")
+    app.setApplicationVersion("1.0")
+    app.setOrganizationName("DICTATOR")
+    app.setDesktopFileName("dictator")
+    
+    # These help GNOME match windows to the desktop file
+    # The WM_CLASS should match the StartupWMClass in the desktop file
+    print(f"✅ Set application name: {app.applicationName()}")
+    print(f"✅ Set desktop file name: dictator")
+
+
+def setup_gnome_integration():
+    """Complete GNOME integration setup - DEPRECATED
+    
+    Desktop files and icons are now installed automatically via pip install
+    using pyproject.toml shared-data configuration. This ensures the correct
+    executable path is used in the desktop file.
+    
+    This function is kept for backward compatibility but does nothing.
+    """
+    print("ℹ️  Desktop integration is handled by pip install")
+    print("   Desktop files and icons are installed automatically")
+    return {
+        'desktop_file': 'Installed via pip to /usr/share/applications/',
+        'installed_icons': 'Installed via pip to /usr/share/icons/hicolor/'
+    }
+
+
+def check_wm_class():
+    """Check current WM_CLASS (for debugging)"""
+    try:
+        result = subprocess.run(
+            ["xprop", "-name", "DICTATOR"], 
+            capture_output=True, 
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            lines = result.stdout.split('\n')
+            for line in lines:
+                if 'WM_CLASS' in line:
+                    print(f"🔍 Current WM_CLASS: {line.strip()}")
+                    return line.strip()
+    except Exception as e:
+        print(f"⚠️ Could not check WM_CLASS: {e}")
+    return None
+
+
 if __name__ == "__main__":
-    # Called during pip install
-    install_desktop_files()
+    # Run complete GNOME integration setup when called directly
+    setup_gnome_integration()
