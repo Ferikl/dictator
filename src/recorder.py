@@ -338,10 +338,10 @@ class PureRecorder:
                 
                 # Start recording subprocess
                 process = subprocess.Popen([
-                    'python', recorder_script,
+                    sys.executable, recorder_script,
                     str(device_index) if device_index is not None else "None",
                     str(working_rate)
-                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                    cwd=os.path.dirname(__file__))
                 
                 # Store subprocess reference for cleanup
@@ -490,7 +490,11 @@ class PureRecorder:
                     print("🔥 WHISPER: Starting transcription with faster-whisper...")
                     print(f"🔥 WHISPER: Audio length: {len(audio_float)} samples")
                     
-                    segments, info = self.whisper_model.transcribe(audio_float)
+                    segments, info = self.whisper_model.transcribe(
+                        audio_float,
+                        language="ru",
+                        initial_prompt="Исправляй орфографию и добавляй пунктуацию. Используй правильные заглавные буквы и грамматику."
+                    )
                     print("🔥 WHISPER: Transcription completed, processing segments...")
                     
                     text = "".join([segment.text for segment in segments]).strip()

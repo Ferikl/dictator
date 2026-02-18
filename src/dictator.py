@@ -995,14 +995,14 @@ class DictatorWindow(QMainWindow):
         if text and text.strip():
             print(f"🔥 Queuing add_history_item for: '{text.strip()}'")
             
-            # Check if our window is active - if not, type the text as keystrokes
+            # Always copy to clipboard so text is ready to paste
+            print("🔥 CLIPBOARD: Copying transcription to clipboard...")
+            self.request_ui_update("copy_to_clipboard", text=text.strip())
+
+            # Also type as keystrokes if window is not active
             if not self.isActiveWindow():
-                print("🔥 KEYBOARD: Window not active, typing text as keystrokes...")
+                print("🔥 KEYBOARD: Window not active, also typing text as keystrokes...")
                 self.request_ui_update("type_text", text=text.strip())
-            else:
-                print("🔥 CLIPBOARD: Window is active, using clipboard...")
-                # Queue clipboard copy to ensure it runs on main thread
-                self.request_ui_update("copy_to_clipboard", text=text.strip())
             
             self.request_ui_update("add_history_item", text=text.strip())
             self.request_ui_update("update_status", 
