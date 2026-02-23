@@ -42,7 +42,7 @@ class PureRecorder:
         self.whisper_model = None
         self.whisper_model_name = "tiny"
         self.use_openai_whisper = False
-        self.whisper_language = "ru"  # Configurable via settings
+        self.whisper_language = ""  # Configurable via settings; empty = auto-detect
         self.whisper_initial_prompt = "Fix spelling and add punctuation. Use correct capitalization and grammar."
         
         # Subprocess tracking for cleanup
@@ -492,7 +492,7 @@ class PureRecorder:
                     print("🔥 WHISPER: Starting transcription with faster-whisper...")
                     print(f"🔥 WHISPER: Audio length: {len(audio_float)} samples")
                     
-                    lang = self.whisper_language if self.whisper_language != "auto" else None
+                    lang = self.whisper_language if self.whisper_language and self.whisper_language != "auto" else None
                     prompt = self.whisper_initial_prompt if self.whisper_initial_prompt.strip() else None
                     segments, info = self.whisper_model.transcribe(
                         audio_float,

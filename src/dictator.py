@@ -47,7 +47,7 @@ class DictatorWindow(QMainWindow):
         super().__init__()
         self.recorder = PureRecorder()
         # Transcription language and prompt (passed to Whisper)
-        self.whisper_language = "ru"  # Default, overridden by config
+        self.whisper_language = ""  # Loaded from config; empty string = auto-detect
         self.whisper_initial_prompt = "Fix spelling and add punctuation. Use correct capitalization and grammar."
         # Load hotkey from config or use default
         self.current_hotkey = ["Ctrl", "Space"]  # Default
@@ -1449,7 +1449,7 @@ class DictatorWindow(QMainWindow):
                     print(f"🔥 CONFIG: Loaded hotkey: {self.hotkey_manager.get_hotkey_string()}")
 
                     # Load transcription language and prompt
-                    self.whisper_language = config.get('whisper_language', 'ru')
+                    self.whisper_language = config.get('whisper_language', '')
                     self.recorder.whisper_language = self.whisper_language
                     print(f"🔥 CONFIG: Loaded Whisper language: {self.whisper_language}")
                     self.whisper_initial_prompt = config.get('whisper_initial_prompt', self.whisper_initial_prompt)
